@@ -25,6 +25,7 @@
 #include "endian.h"
 
 #include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -39,6 +40,18 @@
 #include <mach-o/loader.h>
 
 #define BUF_SZ 4096
+
+static const char* program_name = NULL;
+static bool verbose = false;
+
+static void debug(const char* fmt, ...) {
+        if (verbose) {
+                va_list vargs;
+                va_start(vargs, fmt);
+                vprintf(fmt, vargs);
+                va_end(vargs);
+        }
+}
 
 static void
 expect(bool b, const char* s) {
@@ -159,7 +172,7 @@ macho_unsign(FILE *in, FILE *out, const char *infile, const char *outfile, off_t
                 if (cmd != LC_CODE_SIGNATURE) {
                         fcopy(cmdsize, in, out, infile, outfile);
                 } else {
-                        printf("    found LC_CODE_SIGNATURE\n");
+                        debug("    found LC_CODE_SIGNATURE\n");
                         assert(dataoff == 0);
                         struct linkedit_data_command lc_sig;
                         assert(cmdsize == sizeof(lc_sig));
@@ -188,7 +201,7 @@ ub_unsign(FILE *in, FILE *out, const char *infile, const char *outfile, off_t si
         if (be32dec(&magicb) != FAT_MAGIC) {
                 expect(! fseeko(in, 0, SEEK_SET), infile);
                 macho_unsign(in, out, infile, outfile, size);
-                printf("not a fat binary\n");
+                debug("not a fat binary\n");
                 return;
         }
 
@@ -206,7 +219,7 @@ ub_unsign(FILE *in, FILE *out, const char *infile, const char *outfile, off_t si
         expect(fzero(sizeof(struct fat_arch), nfat_arch, out) == nfat_arch, outfile);
 
         for (uint32_t i = 0; i < nfat_arch; i++) {
-                printf("  processing fat architecture %d of %d\n", i+1, nfat_arch);
+                debug("  processing fat architecture %d of %d\n", i+1, nfat_arch);
                 struct fat_arch arch;
                 expect(fread(&arch, sizeof(arch), 1, in) == 1, infile);
                 off_t inarcho = ftello(in);
@@ -251,11 +264,39 @@ ub_unsign(FILE *in, FILE *out, const char *infile, const char *outfile, off_t si
 
 const char *suffix = ".unsigned";
 
+static void
+usage(int exit_code) {
+        printf("usage: %s [-v] file [outfile]\n", program_name);
+        exit(exit_code);
+}
+
 int
 main(int argc, const char *const *argv) {
+
+        program_name = argv[0];
+        while(argc > 1 && argv[1][0] == '-') {
+                if(strcmp(argv[1], "--") == 0) {
+                        --argc;
+                        ++argv;
+                        break;
+                }
+                else if (strcmp(argv[1], "-v") == 0) {
+                        verbose = true;
+                }
+                else if (strcmp(argv[1], "-h") == 0) {
+                        usage(0);
+                }
+                else {
+                        fprintf(stderr, "Unrecognised option: %s\n", argv[1]);
+                        usage(1);
+                }
+
+                --argc;
+                ++argv;
+        }
+
         if(argc < 2 || argc > 3) {
-                puts("usage: unsign file [outfile]");
-                return 1;
+                usage(1);
         }
 
         const char *infile = argv[1];
@@ -277,7 +318,7 @@ main(int argc, const char *const *argv) {
 
         FILE *in = fdopen(infd, "rb");
         expect(in, infile);
-        printf("reading infile: %s\n", infile);
+        debug("reading infile: %s\n", infile);
 
         FILE * outtmp = tmpfile();
         expect(outtmp, "unable to open temp file");
@@ -303,5 +344,5 @@ main(int argc, const char *const *argv) {
             expect(bytes_written == bytes_read, "didnt write output file completely");
           }
         } while (!feof(outtmp));
-        printf("wrote outfile: %s\n", outfile);
+        debug("wrote outfile: %s\n", outfile);
 }
