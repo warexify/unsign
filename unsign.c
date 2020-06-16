@@ -108,6 +108,8 @@ static void
 macho_unsign(FILE *in, FILE *out, const char *infile, const char *outfile, off_t size) {
         off_t start = ftello(in);
         expect(start != -1, infile);
+        off_t out_start = ftello(out);
+        expect(out_start != -1, outfile);
 
         uint8_t magicb[4];
         expect(fread(&magicb, sizeof(magicb), 1, in) == 1, infile);
@@ -140,22 +142,22 @@ macho_unsign(FILE *in, FILE *out, const char *infile, const char *outfile, off_t
 
         uint32_t ncmds;
         uint32_t sizeofcmds;
+        union {
+          struct mach_header mh;
+          struct mach_header_64 mh64;
+        } header;
         if (sixtyfourbits) {
-                struct mach_header_64 header;
-                expect(fread(&header, sizeof(header), 1, in) == 1, infile);
-                ncmds = x32dec(&header.ncmds);
-                sizeofcmds = x32dec(&header.sizeofcmds);
-                x32enc(&header.ncmds, ncmds - 1);
-                x32enc(&header.sizeofcmds, sizeofcmds - sizeof(struct linkedit_data_command));
-                expect(fwrite(&header, sizeof(header), 1, out) == 1, outfile);
+                struct mach_header_64* mh = &(header.mh64);
+                expect(fread(mh, sizeof(*mh), 1, in) == 1, infile);
+                ncmds = x32dec(&mh->ncmds);
+                sizeofcmds = x32dec(&mh->sizeofcmds);
+                expect(fwrite(mh, sizeof(*mh), 1, out) == 1, outfile);
         } else {
-                struct mach_header header;
-                expect(fread(&header, sizeof(header), 1, in) == 1, infile);
-                ncmds = x32dec(&header.ncmds);
-                sizeofcmds = x32dec(&header.sizeofcmds);
-                x32enc(&header.ncmds, ncmds - 1);
-                x32enc(&header.sizeofcmds, sizeofcmds - sizeof(struct linkedit_data_command));
-                expect(fwrite(&header, sizeof(header), 1, out) == 1, outfile);
+                struct mach_header* mh = &(header.mh);
+                expect(fread(mh, sizeof(*mh), 1, in) == 1, infile);
+                ncmds = x32dec(&mh->ncmds);
+                sizeofcmds = x32dec(&mh->sizeofcmds);
+                expect(fwrite(mh, sizeof(*mh), 1, out) == 1, outfile);
         }
 
         uint32_t dataoff = 0, datasize = 0;
@@ -182,16 +184,45 @@ macho_unsign(FILE *in, FILE *out, const char *infile, const char *outfile, off_t
                         datasize = x32dec(&lc_sig.datasize);
                 }
         }
-        assert(dataoff != 0);
-        expect(fzero(sizeof(struct linkedit_data_command), 1, out) == 1, outfile);
-        off_t after_lc = ftello(in);
-        expect(after_lc != -1, infile);
-        fcopy(dataoff - (after_lc - start), in, out, infile, outfile);
-        expect(fzero(1, datasize, out) == datasize, outfile);
-        expect(fseeko(in, datasize, SEEK_CUR) != -1, infile);
+        if (dataoff != 0) {
+                /* We have removed the LC_CODE_SIGNATURE load command.  We
+                 * need to fill output with zeroes to ensure data is still at
+                 * same offsets.
+                 */
+                expect(fzero(sizeof(struct linkedit_data_command), 1, out) == 1, outfile);
+
+                /* Copy data up to the code signature data.  */
+                off_t after_lc = ftello(in);
+                expect(after_lc != -1, infile);
+                fcopy(dataoff - (after_lc - start), in, out, infile, outfile);
+
+                /* Zero out the code signature data, and skip it in the input
+                 * file.
+                 */
+                expect(fzero(1, datasize, out) == datasize, outfile);
+                expect(fseeko(in, datasize, SEEK_CUR) != -1, infile);
+        }
         off_t after_data = ftello(in);
         expect(after_data != -1, infile);
         fcopy(size - (after_data - start), in, out, infile, outfile);
+        if (dataoff != 0) {
+                /* Update the header with new load command info. */
+                off_t out_after_data = ftello(out);
+                expect(out_after_data != -1, outfile);
+                expect(fseeko(out, out_start, SEEK_SET) != -1, outfile);
+                if (sixtyfourbits) {
+                        struct mach_header_64* mh = &(header.mh64);
+                        x32enc(&mh->ncmds, ncmds - 1);
+                        x32enc(&mh->sizeofcmds, sizeofcmds - sizeof(struct linkedit_data_command));
+                        expect(fwrite(mh, sizeof(*mh), 1, out) == 1, outfile);
+                } else {
+                        struct mach_header* mh = &(header.mh);
+                        x32enc(&mh->ncmds, ncmds - 1);
+                        x32enc(&mh->sizeofcmds, sizeofcmds - sizeof(struct linkedit_data_command));
+                        expect(fwrite(mh, sizeof(*mh), 1, out) == 1, outfile);
+                }
+                expect(fseeko(out, out_after_data, SEEK_SET) != -1, outfile);
+        }
 }
 
 static void
